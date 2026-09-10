@@ -1,0 +1,210 @@
+name: Scan and deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: ECR image tag to scan and deploy (normally a commit SHA)
+        required: true
+        type: string
+      eks_cluster_name:
+        description: Name of the target EKS cluster
+        required: true
+        type: string
+      eks_region:
+        description: AWS region containing the EKS cluster
+        required: true
+        default: ap-southeast-1
+        type: string
+      kubernetes_namespace:
+        description: Kubernetes namespace for the application
+        required: true
+        default: image-trust-demo
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.eks_cluster_name }}-${{ inputs.kubernetes_namespace }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-image:
+    name: Resolve image tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image_uri: ${{ steps.image.outputs.uri }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION AWS_ROLE_ARN ECR_REGISTRY ECR_REPOSITORY IMAGE_TAG; do
+            [[ -n "${!name}" ]] || { echo "Missing GitHub configuration: $name" >&2; exit 2; }
+          done
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || {
+            echo "image_tag is not a valid container tag" >&2
+            exit 2
+          }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve immutable image digest
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          [[ "$digest" == sha256:* ]] || { echo "Could not resolve ECR image digest" >&2; exit 1; }
+          echo "uri=$ECR_REGISTRY/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+
+  image-scan:
+    name: Pull and scan ECR image with Wiz
+    needs: resolve-image
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-image-scan.yml@main
+    with:
+      image: ${{ needs.resolve-image.outputs.image_uri }}
+      build_image: false
+      pull_image: true
+      registry: ${{ vars.ECR_REGISTRY }}
+      registry_username: AWS
+      scan_types: all
+      publish: true
+      fail_on_policy: true
+      tag_image: true
+    secrets:
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      REGISTRY_PASSWORD: ${{ secrets.ECR_REGISTRY_PASSWORD }}
+
+  deploy:
+    name: Deploy approved digest to EKS
+    needs: [resolve-image, image-scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      EKS_CLUSTER_NAME: ${{ inputs.eks_cluster_name }}
+      EKS_REGION: ${{ inputs.eks_region }}
+      KUBERNETES_NAMESPACE: ${{ inputs.kubernetes_namespace }}
+      IMAGE_URI: ${{ needs.resolve-image.outputs.image_uri }}
+      TRUSTED_IMAGE_TAGGED: ${{ needs.image-scan.outputs.trusted_image_tagged }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_ROLE_ARN EKS_CLUSTER_NAME EKS_REGION KUBERNETES_NAMESPACE IMAGE_URI; do
+            [[ -n "${!name}" ]] || { echo "Missing GitHub configuration: $name" >&2; exit 2; }
+          done
+          [[ "$EKS_CLUSTER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$ ]] || {
+            echo "eks_cluster_name is invalid" >&2
+            exit 2
+          }
+          [[ "$EKS_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || {
+            echo "eks_region is invalid" >&2
+            exit 2
+          }
+          [[ "$KUBERNETES_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#KUBERNETES_NAMESPACE} -le 63 ]] || {
+            echo "kubernetes_namespace must be a valid DNS label" >&2
+            exit 2
+          }
+          [[ "$TRUSTED_IMAGE_TAGGED" == "true" ]] || {
+            echo "The reusable workflow did not confirm Image Trust tagging" >&2
+            exit 1
+          }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.EKS_REGION }}
+
+      - name: Install matching kubectl client
+        shell: bash
+        run: |
+          set -euo pipefail
+          cluster_version=$(aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$EKS_REGION" \
+            --query 'cluster.version' \
+            --output text)
+          [[ "$cluster_version" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "Could not determine EKS version" >&2; exit 1; }
+          kubectl_url="https://dl.k8s.io/release/v${cluster_version}.0/bin/linux/amd64/kubectl"
+          curl --fail --location --silent --show-error --output /tmp/kubectl "$kubectl_url"
+          curl --fail --location --silent --show-error --output /tmp/kubectl.sha256 "${kubectl_url}.sha256"
+          echo "$(cat /tmp/kubectl.sha256)  /tmp/kubectl" | sha256sum --check
+          chmod 0755 /tmp/kubectl
+          echo /tmp >> "$GITHUB_PATH"
+
+      - name: Connect to EKS cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$EKS_REGION" \
+            --alias image-trust-demo
+          kubectl version --client
+          kubectl get ingressclass alb > /dev/null || {
+            echo "IngressClass 'alb' is missing. Install the AWS Load Balancer Controller first." >&2
+            exit 1
+          }
+
+      - name: Deploy application and public ALB ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$KUBERNETES_NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          sed "s|IMAGE_URI_PLACEHOLDER|$IMAGE_URI|g" k8s/application.yaml |
+            kubectl --namespace "$KUBERNETES_NAMESPACE" apply -f -
+          kubectl --namespace "$KUBERNETES_NAMESPACE" rollout status \
+            deployment/image-trust-demo --timeout=5m
+
+      - name: Wait for public ALB
+        shell: bash
+        run: |
+          set -euo pipefail
+          alb_hostname=""
+          for _ in $(seq 1 60); do
+            alb_hostname=$(kubectl --namespace "$KUBERNETES_NAMESPACE" get ingress image-trust-demo \
+              --output jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [[ -n "$alb_hostname" ]] && break
+            sleep 10
+          done
+          [[ -n "$alb_hostname" ]] || {
+            kubectl --namespace "$KUBERNETES_NAMESPACE" describe ingress image-trust-demo
+            echo "The AWS Load Balancer Controller did not publish an ALB hostname within 10 minutes" >&2
+            exit 1
+          }
+          {
+            echo "## Deployed image"
+            echo
+            echo "\`$IMAGE_URI\`"
+            echo
+            echo "Public URL: http://$alb_hostname"
+          } >> "$GITHUB_STEP_SUMMARY"

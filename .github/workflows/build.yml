@@ -1,0 +1,179 @@
+name: Build, scan, and publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  directory-scan:
+    name: Scan source with Wiz
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@main
+    with:
+      scan_types: all
+      path: .
+      publish: true
+      fail_on_policy: true
+    secrets:
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+
+  build-and-stage:
+    name: Build and stage image in ECR
+    needs: directory-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
+      image_uri: ${{ steps.image.outputs.uri }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION AWS_ROLE_ARN ECR_REGISTRY ECR_REPOSITORY; do
+            [[ -n "${!name}" ]] || { echo "Missing GitHub configuration: $name" >&2; exit 2; }
+          done
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" |
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build and push candidate image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate_uri="$ECR_REGISTRY/$ECR_REPOSITORY:$candidate_tag"
+          docker build \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$candidate_uri" .
+          docker push "$candidate_uri"
+
+          digest=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$candidate_tag" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          [[ "$digest" == sha256:* ]] || { echo "Could not resolve candidate image digest" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "uri=$ECR_REGISTRY/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Log out of ECR
+        if: always()
+        shell: bash
+        run: docker logout "$ECR_REGISTRY"
+
+  image-scan:
+    name: Scan and trust candidate image with Wiz
+    needs: build-and-stage
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-image-scan.yml@main
+    with:
+      image: ${{ needs.build-and-stage.outputs.image_uri }}
+      build_image: false
+      pull_image: true
+      registry: ${{ vars.ECR_REGISTRY }}
+      registry_username: AWS
+      scan_types: all
+      publish: true
+      fail_on_policy: true
+      tag_image: true
+    secrets:
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      REGISTRY_PASSWORD: ${{ secrets.ECR_REGISTRY_PASSWORD }}
+
+  promote:
+    name: Promote trusted image
+    needs: [build-and-stage, image-scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      IMAGE_DIGEST: ${{ needs.build-and-stage.outputs.image_digest }}
+      TRUSTED_IMAGE_TAGGED: ${{ needs.image-scan.outputs.trusted_image_tagged }}
+    steps:
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION AWS_ROLE_ARN ECR_REGISTRY ECR_REPOSITORY IMAGE_DIGEST; do
+            [[ -n "${!name}" ]] || { echo "Missing GitHub configuration: $name" >&2; exit 2; }
+          done
+          [[ "$TRUSTED_IMAGE_TAGGED" == "true" ]] || {
+            echo "The reusable workflow did not confirm Image Trust tagging" >&2
+            exit 1
+          }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Add release tag to trusted digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_digest=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)
+          if [[ "$existing_digest" == "$IMAGE_DIGEST" ]]; then
+            echo "Release tag already points to the trusted digest; no promotion needed."
+          elif [[ "$existing_digest" == sha256:* ]]; then
+            echo "Release tag $GITHUB_SHA already points to a different digest" >&2
+            exit 1
+          else
+            manifest=$(aws ecr batch-get-image \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageDigest=$IMAGE_DIGEST" \
+              --query 'images[0].imageManifest' \
+              --output text)
+            [[ "$manifest" != "None" && -n "$manifest" ]] || { echo "Could not read candidate manifest" >&2; exit 1; }
+
+            aws ecr put-image \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-tag "$GITHUB_SHA" \
+              --image-manifest "$manifest" > /dev/null
+          fi
+          {
+            echo "## Published trusted image"
+            echo
+            echo "\`$ECR_REGISTRY/$ECR_REPOSITORY@$IMAGE_DIGEST\`"
+            echo
+            echo "Release tag: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
