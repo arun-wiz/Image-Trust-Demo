@@ -21,29 +21,27 @@ Open <http://localhost:8080>. The health endpoint is available at
 `.github/workflows/build.yml` runs on pushes to `main` and on manual dispatch:
 
 1. Scans the checked-out source with the central Wiz directory workflow.
-2. Builds the container and pushes it to ECR with a unique
-   `candidate-<commit SHA>-<run ID>-<attempt>` quarantine tag.
-3. Resolves the candidate to an immutable registry digest, then uses the
-   central image workflow to pull and scan that exact digest.
-4. Sets `tag_image: true`, so a successful scan adds the digest to the Wiz
-   Trusted Image Database.
-5. Requires the workflow's `trusted_image_tagged` output to be `true`, then
-   promotes the same manifest to the release commit-SHA tag without rebuilding
-   it.
+2. Builds the commit-SHA image locally in this repository's workflow.
+3. Calls the platform-agnostic Wiz image-scan composite action, which scans the
+   local image and enforces centrally configured Wiz CI/CD policies before any
+   registry push.
+4. Only after a successful scan, assumes the AWS role through GitHub OIDC,
+   authenticates to ECR, pushes the same local image, and captures its
+   registry-assigned digest.
+5. Calls the platform-agnostic Wiz image-tag composite action with that digest
+   to add it to the Wiz Trusted Image Database.
 
-The temporary candidate tag is necessary because ECR assigns the registry
-digest used by Image Trust only after the image is pushed. A failed scan leaves
-the candidate in ECR but never creates the release tag and never adds it to the
-Wiz Trusted Image Database. An ECR lifecycle rule can expire `candidate-*`
-images automatically.
+All image steps execute in the same caller-owned job, so the exact image
+that passes the scan is the one pushed to ECR. A scan or policy failure skips
+both the ECR push and Image Trust registration.
 
 ### Scan and deploy
 
 `.github/workflows/deploy.yml` is manually dispatched with the commit SHA tag
-and the target EKS cluster information. It first resolves the tag to an
-immutable ECR digest, then pulls and scans that digest through the central Wiz
-image workflow. The workflow also refreshes the image's trusted status with
-`tag_image: true`.
+and the target EKS cluster information. Its scan job assumes the AWS role,
+resolves the tag to an immutable ECR digest, and pulls that digest. It then uses
+the platform-agnostic Wiz scan and tag composite actions before allowing the
+EKS deployment job to run.
 
 After the policy and Image Trust operations pass, the workflow:
 
@@ -77,7 +75,6 @@ Create these Actions secrets:
 | --- | --- |
 | `WIZ_CLIENT_ID` | Wiz CI/CD service-account client ID |
 | `WIZ_CLIENT_SECRET` | Wiz CI/CD service-account client secret |
-| `ECR_REGISTRY_PASSWORD` | Password used by the reusable workflow to pull the private ECR image |
 
 `WIZ_CLIENT_ID` and `WIZ_CLIENT_SECRET` may be organization-level secrets. Give
 this repository access to them in the `arun-wiz` organization; the explicit
@@ -95,20 +92,9 @@ Create these repository or environment variables:
 | `ECR_REGISTRY` | `123456789012.dkr.ecr.ap-southeast-1.amazonaws.com` |
 | `ECR_REPOSITORY` | `image-trust-demo` |
 
-`ECR_REGISTRY_PASSWORD` can be generated with:
-
-```bash
-aws ecr get-login-password --region ap-southeast-1
-```
-
-Amazon ECR authorization tokens expire after 12 hours, so refresh this secret
-before running either workflow. This limitation comes from the current
-central image workflow accepting registry username/password credentials but not
-AWS OIDC credentials. For an unattended deploy pipeline, extend
-`wiz-image-scan.yml` to authenticate to ECR with GitHub OIDC.
-
 The AWS role must trust this repository's GitHub OIDC subject. The build job
-needs ECR upload permissions. The deploy job needs ECR read access and
+needs ECR authentication and upload permissions. The deploy job needs ECR
+authentication and read access plus
 `eks:DescribeCluster`. Its IAM principal must also have an EKS access entry (or
 equivalent Kubernetes RBAC mapping) that can manage namespaces, Deployments,
 Services, and Ingresses. The cluster node or Fargate execution role must be able
@@ -121,6 +107,6 @@ use a network-connected self-hosted runner for a private-only endpoint. The
 demo exposes HTTP on port 80. Add an ACM certificate and HTTPS listener
 annotations before using it for production traffic.
 
-The reusable workflows currently reference `@main` so the demo always tests the
-latest version of `arun-wiz/wiz-workflows`. Switch these references to a release
-tag after the reusable workflows have been tested.
+The reusable workflow and composite actions currently reference `@main` so the
+demo always tests the latest version of `arun-wiz/wiz-workflows`. Switch these
+references to a release tag after they have been tested.

@@ -31,18 +31,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  resolve-image:
-    name: Resolve image tag
+  scan-image:
+    name: Pull, scan, and trust ECR image
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     outputs:
       image_uri: ${{ steps.image.outputs.uri }}
+      image_digest: ${{ steps.image.outputs.digest }}
+      trusted_image_tagged: ${{ steps.wiz_tag.outputs.trusted_image_tagged }}
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       IMAGE_TAG: ${{ inputs.image_tag }}
+      REPORT_DIR: /tmp/wiz-image-reports
     steps:
       - name: Validate configuration
         shell: bash
@@ -55,12 +58,20 @@ jobs:
             echo "image_tag is not a valid container tag" >&2
             exit 2
           }
+          mkdir -p "$REPORT_DIR"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" |
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Resolve immutable image digest
         id: image
@@ -73,30 +84,57 @@ jobs:
             --query 'imageDetails[0].imageDigest' \
             --output text)
           [[ "$digest" == sha256:* ]] || { echo "Could not resolve ECR image digest" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "uri=$ECR_REGISTRY/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
 
-  image-scan:
-    name: Pull and scan ECR image with Wiz
-    needs: resolve-image
-    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-image-scan.yml@main
-    with:
-      image: ${{ needs.resolve-image.outputs.image_uri }}
-      build_image: false
-      pull_image: true
-      registry: ${{ vars.ECR_REGISTRY }}
-      registry_username: AWS
-      scan_types: all
-      publish: true
-      fail_on_policy: true
-      tag_image: true
-    secrets:
-      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
-      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
-      REGISTRY_PASSWORD: ${{ secrets.ECR_REGISTRY_PASSWORD }}
+      - name: Pull image from ECR
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_URI"
+
+      - name: Scan image with Wiz
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@main
+        with:
+          image: ${{ steps.image.outputs.uri }}
+          scan_types: all
+          dockerfile: ""
+          publish: "true"
+          fail_on_policy: "true"
+          report_dir: ${{ env.REPORT_DIR }}
+          wiz_client_id: ${{ secrets.WIZ_CLIENT_ID }}
+          wiz_client_secret: ${{ secrets.WIZ_CLIENT_SECRET }}
+
+      - name: Refresh Wiz Image Trust registration
+        id: wiz_tag
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@main
+        with:
+          image: ${{ steps.image.outputs.uri }}
+          image_digest: ${{ steps.image.outputs.digest }}
+          report_dir: ${{ env.REPORT_DIR }}
+          wiz_client_id: ${{ secrets.WIZ_CLIENT_ID }}
+          wiz_client_secret: ${{ secrets.WIZ_CLIENT_SECRET }}
+
+      - name: Log out of ECR
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: docker logout "$ECR_REGISTRY"
+
+      - name: Upload Wiz image reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ format('wiz-deploy-image-{0}-{1}-{2}', github.repository_id, github.run_id, github.run_attempt) }}
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
 
   deploy:
     name: Deploy approved digest to EKS
-    needs: [resolve-image, image-scan]
+    needs: scan-image
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -105,8 +143,8 @@ jobs:
       EKS_CLUSTER_NAME: ${{ inputs.eks_cluster_name }}
       EKS_REGION: ${{ inputs.eks_region }}
       KUBERNETES_NAMESPACE: ${{ inputs.kubernetes_namespace }}
-      IMAGE_URI: ${{ needs.resolve-image.outputs.image_uri }}
-      TRUSTED_IMAGE_TAGGED: ${{ needs.image-scan.outputs.trusted_image_tagged }}
+      IMAGE_URI: ${{ needs.scan-image.outputs.image_uri }}
+      TRUSTED_IMAGE_TAGGED: ${{ needs.scan-image.outputs.trusted_image_tagged }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,7 +171,7 @@ jobs:
             exit 2
           }
           [[ "$TRUSTED_IMAGE_TAGGED" == "true" ]] || {
-            echo "The reusable workflow did not confirm Image Trust tagging" >&2
+            echo "The Wiz tag action did not confirm Image Trust registration" >&2
             exit 1
           }
 
