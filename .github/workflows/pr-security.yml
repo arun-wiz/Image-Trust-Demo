@@ -30,7 +30,6 @@ jobs:
 
   image-scan:
     name: Build and scan image with Wiz
-    needs: directory-scan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
