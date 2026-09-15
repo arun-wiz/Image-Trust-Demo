@@ -2,7 +2,10 @@ name: Build, scan, and publish
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - staging
+      - production
   workflow_dispatch:
 
 permissions:
@@ -20,6 +23,7 @@ jobs:
     with:
       scan_types: all
       path: .
+      policy_profile: auto
       publish: true
       fail_on_policy: true
     secrets:
@@ -69,6 +73,7 @@ jobs:
           image: ${{ env.IMAGE_URI }}
           scan_types: all
           dockerfile: Dockerfile
+          policy_profile: auto
           publish: "true"
           fail_on_policy: "true"
           report_dir: ${{ env.REPORT_DIR }}

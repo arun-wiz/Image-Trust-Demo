@@ -14,11 +14,42 @@ docker run --rm -p 8080:8080 image-trust-demo
 Open <http://localhost:8080>. The health endpoint is available at
 <http://localhost:8080/healthz>.
 
+## Branch and promotion workflow
+
+The repository uses three long-lived branches:
+
+| Branch | Purpose | Allowed pull request source |
+| --- | --- | --- |
+| `main` | Integrated development code | A feature or fix branch |
+| `staging` | Code undergoing staging tests | `main` |
+| `production` | Code approved for production | `staging` |
+
+Use the following promotion path:
+
+1. Create a feature or fix branch from the latest `main` and make changes there.
+2. Open a pull request from that branch to `main`.
+3. When the change is ready for staging, open a pull request from `main` to
+   `staging` and complete staging tests.
+4. After staging approval, open a pull request from `staging` to `production`.
+
+Direct pushes to the three long-lived branches are blocked by GitHub branch
+protection. `.github/workflows/validate-promotion.yml` rejects pull requests
+that bypass the promotion path. Sync a local branch without creating merge
+commits by using `git pull --ff-only`.
+
 ## Pipelines
 
 ### Build, scan, and publish
 
-`.github/workflows/build.yml` runs on pushes to `main` and on manual dispatch:
+`.github/workflows/pr-security.yml` runs source and locally built image scans on
+pull requests targeting `main`, `staging`, or `production`. The branch-aware
+policy selection from `arun-wiz/wiz-workflows` is enabled with
+`policy_profile: auto`: staging PRs use the staging policy set, while main and
+production PRs use the production policy set. PR image scans do not authenticate
+to AWS or push an image.
+
+`.github/workflows/build.yml` runs after merges to `main`, `staging`, and
+`production`, and on manual dispatch:
 
 1. Scans the checked-out source with the central Wiz directory workflow.
 2. Builds the commit-SHA image locally in this repository's workflow.
@@ -30,6 +61,9 @@ Open <http://localhost:8080>. The health endpoint is available at
    registry-assigned digest.
 5. Calls the platform-agnostic Wiz image-tag composite action with that digest
    to add it to the Wiz Trusted Image Database.
+
+Both its source and image scans use the same automatic branch-aware policy
+selection. Images are published only by this post-merge workflow.
 
 All image steps execute in the same caller-owned job, so the exact image
 that passes the scan is the one pushed to ECR. A scan or policy failure skips
