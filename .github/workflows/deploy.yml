@@ -96,7 +96,7 @@ jobs:
           docker pull "$IMAGE_URI"
 
       - name: Scan image with Wiz
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
         with:
           image: ${{ steps.image.outputs.uri }}
           scan_types: all
@@ -109,7 +109,7 @@ jobs:
 
       - name: Refresh Wiz Image Trust registration
         id: wiz_tag
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
         with:
           image: ${{ steps.image.outputs.uri }}
           image_digest: ${{ steps.image.outputs.digest }}
