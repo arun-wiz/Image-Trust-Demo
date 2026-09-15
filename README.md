@@ -41,12 +41,9 @@ commits by using `git pull --ff-only`.
 
 ### Build, scan, and publish
 
-`.github/workflows/pr-security.yml` runs source and locally built image scans on
-pull requests targeting `main`, `staging`, or `production`. The branch-aware
-policy selection from `arun-wiz/wiz-workflows` is enabled with
-`policy_profile: auto`: staging PRs use the staging policy set, while main and
-production PRs use the production policy set. PR image scans do not authenticate
-to AWS or push an image.
+Pull requests are scanned by the native Wiz GitHub integration. This repository
+does not run an additional Wiz CLI pull-request workflow, avoiding duplicate
+source and IaC scans.
 
 `.github/workflows/build.yml` runs after merges to `main`, `staging`, and
 `production`, and on manual dispatch:
