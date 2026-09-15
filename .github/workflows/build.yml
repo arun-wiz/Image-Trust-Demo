@@ -19,7 +19,7 @@ concurrency:
 jobs:
   directory-scan:
     name: Scan source with Wiz
-    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@main
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@v1
     with:
       scan_types: all
       path: .
@@ -68,7 +68,7 @@ jobs:
 
       - name: Scan image with Wiz
         id: wiz_scan
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@v1
         with:
           image: ${{ env.IMAGE_URI }}
           scan_types: all
@@ -115,7 +115,7 @@ jobs:
 
       - name: Add pushed digest to Wiz Image Trust
         id: wiz_tag
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@v1
         with:
           image: ${{ env.IMAGE_URI }}
           image_digest: ${{ steps.push.outputs.digest }}
