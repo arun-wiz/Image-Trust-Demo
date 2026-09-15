@@ -3,7 +3,6 @@ name: Build, scan, and publish
 on:
   push:
     branches:
-      - main
       - staging
       - production
   workflow_dispatch:
