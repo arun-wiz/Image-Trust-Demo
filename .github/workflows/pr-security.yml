@@ -17,7 +17,7 @@ concurrency:
 jobs:
   directory-scan:
     name: Scan source with Wiz
-    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@v1
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
     with:
       scan_types: all
       path: .
@@ -52,7 +52,7 @@ jobs:
             --tag "$IMAGE_NAME" .
 
       - name: Scan image with Wiz
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@v1
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
         with:
           image: ${{ env.IMAGE_NAME }}
           scan_types: all

@@ -141,5 +141,6 @@ use a network-connected self-hosted runner for a private-only endpoint. The
 demo exposes HTTP on port 80. Add an ACM certificate and HTTPS listener
 annotations before using it for production traffic.
 
-The reusable workflow and composite actions are pinned to the tested `v1`
-release of `arun-wiz/wiz-workflows`.
+The reusable workflow and composite actions use the tested `v1` release of
+`arun-wiz/wiz-workflows`, pinned to its full commit SHA so the references are
+immutable.
