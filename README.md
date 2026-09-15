@@ -45,8 +45,8 @@ Pull requests are scanned by the native Wiz GitHub integration. This repository
 does not run an additional Wiz CLI pull-request workflow, avoiding duplicate
 source and IaC scans.
 
-`.github/workflows/build.yml` runs after merges to `main`, `staging`, and
-`production`, and on manual dispatch:
+`.github/workflows/build.yml` runs only after changes are pushed or merged to
+`staging` or `production`:
 
 1. Scans the checked-out source with the central Wiz directory workflow.
 2. Builds the commit-SHA image locally in this repository's workflow.
