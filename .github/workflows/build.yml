@@ -2,7 +2,9 @@ name: Build, scan, and publish
 
 on:
   push:
-    branches: [main]
+    branches:
+      - staging
+      - production
   workflow_dispatch:
 
 permissions:
@@ -16,10 +18,11 @@ concurrency:
 jobs:
   directory-scan:
     name: Scan source with Wiz
-    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@main
+    uses: arun-wiz/wiz-workflows/.github/workflows/wiz-dir-scan.yml@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
     with:
       scan_types: all
       path: .
+      policy_profile: auto
       publish: true
       fail_on_policy: true
     secrets:
@@ -64,11 +67,12 @@ jobs:
 
       - name: Scan image with Wiz
         id: wiz_scan
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-scan@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
         with:
           image: ${{ env.IMAGE_URI }}
           scan_types: all
           dockerfile: Dockerfile
+          policy_profile: auto
           publish: "true"
           fail_on_policy: "true"
           report_dir: ${{ env.REPORT_DIR }}
@@ -110,7 +114,7 @@ jobs:
 
       - name: Add pushed digest to Wiz Image Trust
         id: wiz_tag
-        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@main
+        uses: arun-wiz/wiz-workflows/.github/actions/wiz-image-tag@63f6022dbbc90eb42a53cef4f32c5607f0e438ec # v1
         with:
           image: ${{ env.IMAGE_URI }}
           image_digest: ${{ steps.push.outputs.digest }}

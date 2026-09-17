@@ -14,11 +14,40 @@ docker run --rm -p 8080:8080 image-trust-demo
 Open <http://localhost:8080>. The health endpoint is available at
 <http://localhost:8080/healthz>.
 
+## Branch and promotion workflow
+
+The repository uses three long-lived branches:
+
+| Branch | Purpose | Allowed pull request source |
+| --- | --- | --- |
+| `main` | Integrated development code | A feature or fix branch |
+| `staging` | Code undergoing staging tests | `main` |
+| `production` | Code approved for production | `staging` |
+
+Use the following promotion path:
+
+1. Create a feature or fix branch from the latest `main` and make changes there.
+2. Open a pull request from that branch to `main`.
+3. When the change is ready for staging, open a pull request from `main` to
+   `staging` and complete staging tests.
+4. After staging approval, open a pull request from `staging` to `production`.
+
+Direct pushes to the three long-lived branches are blocked by GitHub branch
+protection. `.github/workflows/validate-promotion.yml` rejects pull requests
+that bypass the promotion path. Sync a local branch without creating merge
+commits by using `git pull --ff-only`.
+
 ## Pipelines
 
 ### Build, scan, and publish
 
-`.github/workflows/build.yml` runs on pushes to `main` and on manual dispatch:
+Pull requests are scanned by the native Wiz GitHub integration. This repository
+does not run an additional Wiz CLI pull-request workflow, avoiding duplicate
+source and IaC scans.
+
+`.github/workflows/build.yml` runs after changes are pushed or merged to
+`staging` or `production`, and it can also be started manually with
+`workflow_dispatch`:
 
 1. Scans the checked-out source with the central Wiz directory workflow.
 2. Builds the commit-SHA image locally in this repository's workflow.
@@ -30,6 +59,9 @@ Open <http://localhost:8080>. The health endpoint is available at
    registry-assigned digest.
 5. Calls the platform-agnostic Wiz image-tag composite action with that digest
    to add it to the Wiz Trusted Image Database.
+
+Both its source and image scans use the same automatic branch-aware policy
+selection. Images are published only by this post-merge workflow.
 
 All image steps execute in the same caller-owned job, so the exact image
 that passes the scan is the one pushed to ECR. A scan or policy failure skips
@@ -107,6 +139,6 @@ use a network-connected self-hosted runner for a private-only endpoint. The
 demo exposes HTTP on port 80. Add an ACM certificate and HTTPS listener
 annotations before using it for production traffic.
 
-The reusable workflow and composite actions currently reference `@main` so the
-demo always tests the latest version of `arun-wiz/wiz-workflows`. Switch these
-references to a release tag after they have been tested.
+The reusable workflow and composite actions use the tested `v1` release of
+`arun-wiz/wiz-workflows`, pinned to its full commit SHA so the references are
+immutable.

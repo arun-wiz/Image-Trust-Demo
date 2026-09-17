@@ -1,0 +1,51 @@
+name: Validate promotion path
+
+on:
+  pull_request:
+    branches:
+      - main
+      - staging
+      - production
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-path:
+    name: Validate promotion path
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check source and target branches
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$BASE_BRANCH" in
+            main)
+              if [[ "$HEAD_BRANCH" == "staging" || "$HEAD_BRANCH" == "production" ]]; then
+                echo "Pull requests to main must come from a feature or fix branch." >&2
+                exit 1
+              fi
+              ;;
+            staging)
+              [[ "$HEAD_BRANCH" == "main" ]] || {
+                echo "Only main can be promoted to staging." >&2
+                exit 1
+              }
+              ;;
+            production)
+              [[ "$HEAD_BRANCH" == "staging" ]] || {
+                echo "Only staging can be promoted to production." >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "Unexpected target branch: $BASE_BRANCH" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "Allowed promotion: $HEAD_BRANCH -> $BASE_BRANCH"
