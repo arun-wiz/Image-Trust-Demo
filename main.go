@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 )
 
 const page = `<!doctype html>
@@ -24,6 +26,8 @@ const page = `<!doctype html>
 <body><main><h1>Hello from Wiz</h1></main></body>
 </html>`
 
+var pageETag = fmt.Sprintf(`"%x"`, sha3.Sum256([]byte(page)))
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -31,6 +35,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("ETag", pageETag)
 	_, _ = fmt.Fprint(w, page)
 }
 
